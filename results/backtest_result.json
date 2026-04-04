@@ -1,0 +1,263 @@
+{
+  "algorithm": "15-model ensemble + confidence filter (|P-0.5|>=0.3)",
+  "full_accuracy": 0.5512,
+  "filtered_accuracy": 0.6042,
+  "filtered_count": 1776,
+  "filtered_coverage": 0.0861,
+  "total_predictions": 20625,
+  "stocks_covered": 50,
+  "baseline": 0.5275,
+  "per_stock": {
+    "HK.00005": {
+      "accuracy": 0.6842,
+      "correct": 26,
+      "total": 38
+    },
+    "HK.00027": {
+      "accuracy": 0.64,
+      "correct": 16,
+      "total": 25
+    },
+    "HK.00066": {
+      "accuracy": 0.6296,
+      "correct": 17,
+      "total": 27
+    },
+    "HK.00175": {
+      "accuracy": 0.5246,
+      "correct": 32,
+      "total": 61
+    },
+    "HK.00241": {
+      "accuracy": 0.6849,
+      "correct": 50,
+      "total": 73
+    },
+    "HK.00267": {
+      "accuracy": 0.7059,
+      "correct": 24,
+      "total": 34
+    },
+    "HK.00285": {
+      "accuracy": 0.8293,
+      "correct": 34,
+      "total": 41
+    },
+    "HK.00288": {
+      "accuracy": 0.875,
+      "correct": 7,
+      "total": 8
+    },
+    "HK.00386": {
+      "accuracy": 0.4,
+      "correct": 6,
+      "total": 15
+    },
+    "HK.00388": {
+      "accuracy": 0.5821,
+      "correct": 39,
+      "total": 67
+    },
+    "HK.00669": {
+      "accuracy": 0.8333,
+      "correct": 10,
+      "total": 12
+    },
+    "HK.00688": {
+      "accuracy": 0.6944,
+      "correct": 25,
+      "total": 36
+    },
+    "HK.00700": {
+      "accuracy": 0.5357,
+      "correct": 15,
+      "total": 28
+    },
+    "HK.00762": {
+      "accuracy": 0.5714,
+      "correct": 20,
+      "total": 35
+    },
+    "HK.00883": {
+      "accuracy": 0.125,
+      "correct": 3,
+      "total": 24
+    },
+    "HK.00939": {
+      "accuracy": 0.75,
+      "correct": 15,
+      "total": 20
+    },
+    "HK.00941": {
+      "accuracy": 0.3684,
+      "correct": 21,
+      "total": 57
+    },
+    "HK.00960": {
+      "accuracy": 0.8333,
+      "correct": 35,
+      "total": 42
+    },
+    "HK.00981": {
+      "accuracy": 0.481,
+      "correct": 38,
+      "total": 79
+    },
+    "HK.01024": {
+      "accuracy": 0.5263,
+      "correct": 20,
+      "total": 38
+    },
+    "HK.01038": {
+      "accuracy": 0.5,
+      "correct": 13,
+      "total": 26
+    },
+    "HK.01088": {
+      "accuracy": 0.2,
+      "correct": 2,
+      "total": 10
+    },
+    "HK.01177": {
+      "accuracy": 0.8372,
+      "correct": 36,
+      "total": 43
+    },
+    "HK.01211": {
+      "accuracy": 0.5,
+      "correct": 17,
+      "total": 34
+    },
+    "HK.01299": {
+      "accuracy": 0.6364,
+      "correct": 7,
+      "total": 11
+    },
+    "HK.01347": {
+      "accuracy": 0.6078,
+      "correct": 31,
+      "total": 51
+    },
+    "HK.01398": {
+      "accuracy": 0.7667,
+      "correct": 23,
+      "total": 30
+    },
+    "HK.01810": {
+      "accuracy": 0.4595,
+      "correct": 17,
+      "total": 37
+    },
+    "HK.01928": {
+      "accuracy": 0.2222,
+      "correct": 4,
+      "total": 18
+    },
+    "HK.02007": {
+      "accuracy": 0.4722,
+      "correct": 17,
+      "total": 36
+    },
+    "HK.02015": {
+      "accuracy": 0.5616,
+      "correct": 41,
+      "total": 73
+    },
+    "HK.02318": {
+      "accuracy": 0.6042,
+      "correct": 29,
+      "total": 48
+    },
+    "HK.02800": {
+      "accuracy": 0.6667,
+      "correct": 26,
+      "total": 39
+    },
+    "HK.03690": {
+      "accuracy": 0.7556,
+      "correct": 34,
+      "total": 45
+    },
+    "HK.09618": {
+      "accuracy": 0.8621,
+      "correct": 50,
+      "total": 58
+    },
+    "HK.09866": {
+      "accuracy": 0.7273,
+      "correct": 40,
+      "total": 55
+    },
+    "HK.09868": {
+      "accuracy": 0.5256,
+      "correct": 41,
+      "total": 78
+    },
+    "HK.09888": {
+      "accuracy": 0.8571,
+      "correct": 6,
+      "total": 7
+    },
+    "HK.09988": {
+      "accuracy": 0.84,
+      "correct": 42,
+      "total": 50
+    },
+    "HK.09999": {
+      "accuracy": 0.3871,
+      "correct": 12,
+      "total": 31
+    },
+    "SH.600036": {
+      "accuracy": 0.8,
+      "correct": 16,
+      "total": 20
+    },
+    "SH.600276": {
+      "accuracy": 0.6364,
+      "correct": 7,
+      "total": 11
+    },
+    "SH.600519": {
+      "accuracy": 0.1818,
+      "correct": 4,
+      "total": 22
+    },
+    "SH.601012": {
+      "accuracy": 0.8636,
+      "correct": 38,
+      "total": 44
+    },
+    "SH.601318": {
+      "accuracy": 0.7,
+      "correct": 21,
+      "total": 30
+    },
+    "SH.601888": {
+      "accuracy": 0.4348,
+      "correct": 10,
+      "total": 23
+    },
+    "SZ.000001": {
+      "accuracy": 0.72,
+      "correct": 18,
+      "total": 25
+    },
+    "SZ.000333": {
+      "accuracy": 0.7143,
+      "correct": 10,
+      "total": 14
+    },
+    "SZ.000858": {
+      "accuracy": 0.1667,
+      "correct": 3,
+      "total": 18
+    },
+    "SZ.300750": {
+      "accuracy": 0.1724,
+      "correct": 5,
+      "total": 29
+    }
+  },
+  "timestamp": "2026-04-04T20:59:25.298266"
+}
