@@ -1,5 +1,7 @@
 """
 拉取富途港股自选股，用最新K线数据预测未来15天走势。
+港股持仓（实盘/模拟）单独分组展示；环境变量 PREDICT_WATCHLIST_POSITIONS_ENV=REAL|SIMULATE，
+FUTU_SECURITY_FIRM 指定券商（默认 FUTUSECURITIES）。
 """
 
 import json
@@ -82,6 +84,80 @@ def get_hk_watchlist():
                         name_map[code] = s["name"]
 
         return hk_codes, name_map
+    finally:
+        ctx.close()
+
+
+def get_hk_positions(trd_env):
+    """通过富途交易接口查询港股持仓。返回 (rows, err_msg)。
+
+    rows 每项: code, qty, stock_name, pl_ratio(可选 float)。
+    需 OpenD 已登录交易；券商可通过环境变量 FUTU_SECURITY_FIRM（默认 FUTUSECURITIES）。
+    """
+    from futu import OpenSecTradeContext, TrdEnv, TrdMarket, RET_OK, SecurityFirm
+
+    firm_name = os.environ.get("FUTU_SECURITY_FIRM", "FUTUSECURITIES").upper()
+    firm = getattr(SecurityFirm, firm_name, SecurityFirm.FUTUSECURITIES)
+    ctx = OpenSecTradeContext(
+        filter_trdmarket=TrdMarket.NONE,
+        host="127.0.0.1",
+        port=11111,
+        security_firm=firm,
+    )
+    try:
+        ret, accs = ctx.get_acc_list()
+        if ret != RET_OK:
+            return [], f"get_acc_list 失败: {accs}"
+        if accs is None or accs.empty:
+            return [], "无交易账户（请确认 OpenD 已登录交易）"
+        env_s = "REAL" if trd_env == TrdEnv.REAL else "SIMULATE"
+        accs = accs[accs["trd_env"] == env_s]
+        if accs.empty:
+            return [], f"无 {env_s} 账户"
+        merged = {}
+        for _, acc in accs.iterrows():
+            acc_id = int(acc["acc_id"])
+            ret_p, pos = ctx.position_list_query(
+                position_market=TrdMarket.HK,
+                trd_env=trd_env,
+                acc_id=acc_id,
+                refresh_cache=True,
+            )
+            if ret_p != RET_OK or pos is None or pos.empty:
+                continue
+            for _, p in pos.iterrows():
+                code = str(p["code"])
+                if not code.startswith("HK."):
+                    continue
+                try:
+                    q = float(p.get("qty", 0) or 0)
+                except (TypeError, ValueError):
+                    q = 0.0
+                if q <= 0:
+                    continue
+                nm = p.get("stock_name", "") or ""
+                plr = p.get("pl_ratio")
+                try:
+                    if plr is None or (isinstance(plr, float) and np.isnan(plr)):
+                        plr_f = None
+                    else:
+                        plr_f = float(plr)
+                except (TypeError, ValueError):
+                    plr_f = None
+                if code not in merged:
+                    merged[code] = {
+                        "code": code,
+                        "qty": q,
+                        "stock_name": nm,
+                        "pl_ratio": plr_f,
+                    }
+                else:
+                    merged[code]["qty"] += q
+                    if not merged[code]["stock_name"] and nm:
+                        merged[code]["stock_name"] = nm
+        return list(merged.values()), None
+    except Exception as e:
+        return [], str(e)
     finally:
         ctx.close()
 
@@ -321,18 +397,43 @@ def main():
     # 1. 获取自选股
     print("\n[1] 获取港股自选 ...")
     sys.stdout.flush()
-    codes, name_map = get_hk_watchlist()
-    if not codes:
+    wl_codes, name_map = get_hk_watchlist()
+    if not wl_codes:
         print("  未找到港股自选股。请确认富途自选中有港股。")
         return
-    print(f"  找到 {len(codes)} 只港股: {', '.join(codes[:10])}{'...' if len(codes) > 10 else ''}")
+    print(f"  找到 {len(wl_codes)} 只港股: {', '.join(wl_codes[:10])}{'...' if len(wl_codes) > 10 else ''}")
     sys.stdout.flush()
+
+    # 1b. 真实/模拟账户港股持仓（用于单独分组；K 线会与自选合并拉取）
+    from futu import TrdEnv
+
+    pos_env_raw = os.environ.get("PREDICT_WATCHLIST_POSITIONS_ENV", "REAL").upper()
+    trd_env = TrdEnv.SIMULATE if pos_env_raw == "SIMULATE" else TrdEnv.REAL
+    pos_env_label = "模拟 SIMULATE" if trd_env == TrdEnv.SIMULATE else "实盘 REAL"
+    print(f"\n[1b] 获取港股持仓 ({pos_env_label}) ...")
+    sys.stdout.flush()
+    position_rows, pos_err = get_hk_positions(trd_env)
+    position_by_code = {r["code"]: r for r in position_rows}
+    position_codes = list(position_by_code.keys())
+    if pos_err:
+        print(f"  ⚠ {pos_err}（将仅展示自选预测）")
+    elif not position_codes:
+        print(f"  当前账户无港股持仓（qty>0）。")
+    else:
+        print(f"  港股持仓 {len(position_codes)} 只: {', '.join(position_codes[:10])}{'...' if len(position_codes) > 10 else ''}")
+    for pr in position_rows:
+        c = pr["code"]
+        nm = pr.get("stock_name") or ""
+        if nm and not name_map.get(c):
+            name_map[c] = nm
+
+    codes = list(dict.fromkeys([*position_codes, *wl_codes]))
 
     # 2. 获取最新K线
     print(f"\n[2] 获取最新 K 线 (最近 {LOOKBACK+50} 天) ...")
     sys.stdout.flush()
     stock_data = fetch_recent_kline(codes, days=LOOKBACK + 50)
-    print(f"  成功获取 {len(stock_data)} 只股票数据")
+    print(f"  成功获取 {len(stock_data)} 只股票数据（自选+持仓去重）")
 
     # 3. 加载双模型
     print("\n[3] 加载双模型 ...")
@@ -399,7 +500,7 @@ def main():
     neutral = sum(1 for r in results if r.get("signal") == "无")
 
     buckets = defaultdict(list)
-    for code in codes:
+    for code in wl_codes:
         r = by_code.get(code)
         if r is None:
             buckets["无K线"].append((code, None))
@@ -491,6 +592,88 @@ def main():
             f"{sc_str} {ik:4s} {ist:^4s} {hint_disp:16s} {lc:>10s} {ld:12s}"
         )
 
+    hdr_holdings = (
+        f"  {'代码':12s} {'名称':10s} {'持仓':>8s} {'盈亏%':>7s} {'模型':6s} {'置信':>6s} {'标准P':>7s} {'强P':>7s} {'投票':>6s} "
+        f"{'拐点分':>6s} {'拐点':4s} {'拐强':4s} {'拐点简述':16s} {'收盘':>10s} {'日期':12s}"
+    )
+
+    def print_holdings_row(code, r, pos_meta):
+        qty = pos_meta.get("qty")
+        if qty is None:
+            qty_s = "       —"
+        elif abs(qty - round(qty)) < 1e-6:
+            qty_s = f"{int(round(qty)):>8d}"
+        else:
+            qty_s = f"{qty:>8.2f}"
+        plr = pos_meta.get("pl_ratio")
+        if plr is not None:
+            pls = f"{plr:>+6.1f}%"
+        else:
+            pls = "     —"
+        if r is None:
+            print(
+                f"  {code:12s} {'(无K线)':10s} {qty_s} {pls:>7s} {'—':6s} {'—':>6s} {'—':>7s} {'—':>7s} {'—':>6s} "
+                f"{'—':>6s} {'—':4s} {'—':^4s} {'':16s} {'—':>10s} {'':12s}"
+            )
+            return
+        inf = r.get("inflection")
+        ik, iscore, istr, _fullk, ihint = inf_short(inf)
+        ik = ik or "—"
+        hint_disp = (ihint[:14] + "…") if len(ihint) > 14 else (ihint or "")
+        sc_str = f"{iscore:6.1f}" if iscore is not None else "   —  "
+        ist = str(istr) if istr is not None else "—"
+        cf = r.get("confidence")
+        if cf is not None:
+            try:
+                cf_str = f"{float(cf):5.0%}"
+            except (TypeError, ValueError):
+                cf_str = "   —  "
+        else:
+            cf_str = "   —  "
+        ps = r.get("probability_std")
+        if ps is not None:
+            pss = f"{ps:.1%}"
+            pst = f"{r.get('probability_strong', 0):.1%}"
+            vr = f"{r.get('vote_ratio', 0):.0%}"
+        else:
+            pss = pst = vr = "   —  "
+        lc = r.get("last_close")
+        ld = r.get("last_date") or ""
+        if lc is None:
+            lc = "—"
+        else:
+            lc = str(lc)
+        nm = r.get("name")
+        name = ("" if nm is None or (isinstance(nm, float) and np.isnan(nm)) else str(nm))[:10]
+        mt = model_tag(r)
+        disp_tag = {"强涨": "强涨", "强跌": "强跌", "偏涨": "偏涨", "偏跌": "偏跌", "震荡": "震荡",
+                    "数据不足": "数据不足", "特征失败": "特征失败"}.get(mt, "—")
+        print(
+            f"  {code:12s} {name:10s} {qty_s} {pls:>7s} {disp_tag:6s} {cf_str:>6s} {pss:>7s} {pst:>7s} {vr:>6s} "
+            f"{sc_str} {ik:4s} {ist:^4s} {hint_disp:16s} {lc:>10s} {ld:12s}"
+        )
+
+    if position_codes:
+        ph_list = [(c, by_code.get(c), position_by_code[c]) for c in position_codes]
+        ph_list.sort(
+            key=lambda t: (
+                0 if numeric_confidence((t[0], t[1])) is not None else 1,
+                -(numeric_confidence((t[0], t[1])) or 0.0),
+                t[0],
+            )
+        )
+        print(f"\n  {'─' * 56}")
+        print(f"  【我的港股持仓 | {pos_env_label} · 共 {len(position_codes)} 只】（组内按置信度↓）")
+        print(f"  {'─' * 56}")
+        print(hdr_holdings)
+        print("  " + "-" * 128)
+        for code, r, meta in ph_list:
+            print_holdings_row(code, r, meta)
+    elif not pos_err:
+        print(f"\n  {'─' * 56}")
+        print(f"  【我的港股持仓 | {pos_env_label}】当前无港股持仓")
+        print(f"  {'─' * 56}")
+
     for key, title in section_order:
         rows = buckets.get(key, [])
         if not rows:
@@ -517,7 +700,9 @@ def main():
             "dn_p_strong": DN_P_THRESHOLD,
         },
         "summary": {
-            "watchlist_count": len(codes),
+            "watchlist_count": len(wl_codes),
+            "codes_fetched_count": len(codes),
+            "positions_hk_count": len(position_codes),
             "predictable_count": total,
             "strong_up": strong_up,
             "strong_dn": strong_dn,
@@ -525,12 +710,19 @@ def main():
             "weak_dn": weak_dn,
             "neutral": neutral,
         },
+        "hk_positions_env": pos_env_label,
+        "hk_positions_error": pos_err,
+        "hk_positions": _to_jsonable(position_rows),
         "results": _to_jsonable(results),
     }
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    print(f"  总计 {total} 只可预测 / 自选 {len(codes)} 只")
+    print(f"  总计 {total} 只可预测 / 自选 {len(wl_codes)} 只", end="")
+    if len(codes) > len(wl_codes):
+        print(f"（拉取 K 线含持仓-only 共 {len(codes)} 只）")
+    else:
+        print()
     print(f"  强涨:{strong_up} 强跌:{strong_dn} 偏涨:{weak_up} 偏跌:{weak_dn} 震荡:{neutral}")
     print(f"\n  已保存报告: {report_path}")
     print(f"\n  回测精度: 涨信号≈66%  跌信号≈76%")
