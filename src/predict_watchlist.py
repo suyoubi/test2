@@ -2,23 +2,57 @@
 拉取富途港股自选股，用最新K线数据预测未来15天走势。
 """
 
+import json
 import os
 import sys
 import time
+from collections import defaultdict
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from stock_predictor import (
-    compute_feature_matrix, EnsemblePredictor, MODEL_CONFIGS,
-    LOOKBACK, FORWARD, CONFIDENCE_MARGIN,
+    compute_enhanced_feature_matrix, compute_inflection_signal,
+    DualModelPredictor, DiverseEnsemble,
+    MODEL_CONFIGS, LOOKBACK, FORWARD, CONFIDENCE_MARGIN,
+    UP_P_THRESHOLD, UP_VOTE_MODEL_THRESH, UP_VOTE_AGREE, DN_P_THRESHOLD,
 )
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 RESULT_DIR = os.path.join(PROJECT_ROOT, "results")
-MODEL_PATH = os.path.join(RESULT_DIR, "model.pkl")
-TRAIN_WINDOWS = [9, 12, 18]
+REPORT_DIR = os.path.join(RESULT_DIR, "report")
+DUAL_MODEL_PATH_HK = os.path.join(RESULT_DIR, "dual_model_hk.pkl")
+DUAL_MODEL_PATH_CN = os.path.join(RESULT_DIR, "dual_model_cn.pkl")
+TRAIN_WINDOWS = [6, 12, 24]
 WEIGHT_HALFLIFE = 90
+
+
+def _to_jsonable(obj):
+    """将 numpy 标量等转为 JSON 可序列化类型。"""
+    if isinstance(obj, dict):
+        return {k: _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    if isinstance(obj, np.generic):
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (datetime, pd.Timestamp)):
+        return obj.isoformat()
+    return obj
+
+
+def _predict_report_path():
+    """按日期命名；同日多次运行则加时分秒避免覆盖。目录：results/report/。"""
+    os.makedirs(REPORT_DIR, exist_ok=True)
+    now = datetime.now()
+    d = now.strftime("%Y-%m-%d")
+    base = os.path.join(REPORT_DIR, f"predict_watchlist_{d}.json")
+    if os.path.isfile(base):
+        return os.path.join(
+            REPORT_DIR, f"predict_watchlist_{d}_{now.strftime('%H%M%S')}.json"
+        )
+    return base
 
 
 def get_hk_watchlist():
@@ -182,8 +216,8 @@ def compute_market_benchmark(stock_data):
     return pd.concat(rets, axis=1).mean(axis=1)
 
 
-def predict_stocks(stock_data, model, name_map=None):
-    """对每只股票用模型进行预测"""
+def predict_stocks(stock_data, dual_model, name_map=None):
+    """对每只股票用双模型进行预测"""
     name_map = name_map or {}
     benchmark = compute_market_benchmark(stock_data)
     results = []
@@ -195,12 +229,12 @@ def predict_stocks(stock_data, model, name_map=None):
                 "code": code, "name": name, "prediction": "数据不足",
                 "probability": None, "confidence": None,
                 "last_close": None, "last_date": None,
+                "inflection": None,
             })
             continue
 
-        feat = compute_feature_matrix(df)
+        feat = compute_enhanced_feature_matrix(df)
 
-        # 添加市场相对强弱特征
         stock_ret20 = feat["ret_20d"]
         if benchmark is not None:
             bm_aligned = benchmark.reindex(df["time_key"].values)
@@ -219,27 +253,39 @@ def predict_stocks(stock_data, model, name_map=None):
                 "code": code, "name": name, "prediction": "特征计算失败",
                 "probability": None, "confidence": None,
                 "last_close": None, "last_date": None,
+                "inflection": None,
             })
             continue
 
-        p_up = model.predict_proba_batch(last_row)[0]
-        confidence = abs(p_up - 0.5)
+        inflection = compute_inflection_signal(feat)
 
-        if p_up >= 0.5 + CONFIDENCE_MARGIN:
+        preds, mask, details = dual_model.predict(last_row)
+        p_std = details["p_std"][0]
+        p_strong = details["p_strong"][0]
+        up_ratio = details["up_ratio"][0]
+        is_up = details["is_up"][0]
+        is_dn = details["is_dn"][0]
+
+        if is_up:
             prediction = "涨"
             signal = "强"
-        elif p_up <= 0.5 - CONFIDENCE_MARGIN:
+            confidence = up_ratio
+        elif is_dn:
             prediction = "跌"
             signal = "强"
-        elif p_up >= 0.60:
+            confidence = 1 - p_std
+        elif p_std >= 0.60:
             prediction = "偏涨"
             signal = "弱"
-        elif p_up <= 0.40:
+            confidence = p_std - 0.5
+        elif p_std <= 0.40:
             prediction = "偏跌"
             signal = "弱"
+            confidence = 0.5 - p_std
         else:
             prediction = "震荡"
             signal = "无"
+            confidence = abs(p_std - 0.5)
 
         last_close = df.iloc[-1]["close"]
         last_date = df.iloc[-1]["time_key"].strftime("%Y-%m-%d")
@@ -249,10 +295,13 @@ def predict_stocks(stock_data, model, name_map=None):
             "name": name,
             "prediction": prediction,
             "signal": signal,
-            "probability": round(p_up, 4),
+            "probability_std": round(p_std, 4),
+            "probability_strong": round(p_strong, 4),
+            "vote_ratio": round(up_ratio, 4),
             "confidence": round(confidence, 4),
             "last_close": round(last_close, 2),
             "last_date": last_date,
+            "inflection": inflection,
         })
 
     return results
@@ -260,11 +309,12 @@ def predict_stocks(stock_data, model, name_map=None):
 
 def main():
     print("=" * 70)
-    print("  港股自选股走势预测")
+    print("  港股自选股走势预测 — V3 双模型版")
     print("=" * 70)
     print(f"  预测周期: 未来 {FORWARD} 天")
-    print(f"  模型: 15模型集成 + 置信度过滤")
-    print(f"  高置信阈值: P ≥ {0.5+CONFIDENCE_MARGIN:.0%} 或 P ≤ {0.5-CONFIDENCE_MARGIN:.0%}")
+    print(f"  涨信号: 强标签模型P≥{UP_P_THRESHOLD}+子模型投票≥{UP_VOTE_AGREE:.0%}")
+    print(f"  跌信号: 标准模型P≤{DN_P_THRESHOLD}")
+    print(f"  拐点: 技术面规则(区间/RSI/MACD/均线斜率等)，与双模型独立")
     print("=" * 70)
     sys.stdout.flush()
 
@@ -284,63 +334,207 @@ def main():
     stock_data = fetch_recent_kline(codes, days=LOOKBACK + 50)
     print(f"  成功获取 {len(stock_data)} 只股票数据")
 
-    # 3. 加载模型
-    print("\n[3] 加载预测模型 ...")
-    if not os.path.exists(MODEL_PATH):
-        print(f"  模型文件不存在: {MODEL_PATH}")
+    # 3. 加载双模型
+    print("\n[3] 加载双模型 ...")
+    if not os.path.exists(DUAL_MODEL_PATH_HK):
+        print(f"  双模型文件不存在: {DUAL_MODEL_PATH_HK}")
         print("  请先运行 run_backtest.py 训练模型。")
         return
-    model = EnsemblePredictor.load(MODEL_PATH)
-    print(f"  模型已加载 ({len(model.models)} 个子模型)")
+    dual_model = DualModelPredictor.load(DUAL_MODEL_PATH_HK)
+    n_std = len(dual_model.std_model.models)
+    n_strong = len(dual_model.strong_model.models)
+    print(f"  双模型已加载 (标准{n_std}+强标签{n_strong}个子模型)")
 
     # 4. 预测
     print("\n[4] 预测走势 ...")
     sys.stdout.flush()
-    results = predict_stocks(stock_data, model, name_map)
+    results = predict_stocks(stock_data, dual_model, name_map)
 
-    # 5. 输出结果
-    print("\n" + "=" * 70)
-    print("  预测结果 (未来 15 天)")
-    print("=" * 70)
+    # 5. 输出结果：按模型信号区间分块展示，组内按置信度从高到低
+    print("\n" + "=" * 118)
+    print("  预测结果 (未来 15 天) + 拐点 — 按信号区间分开展示")
+    print("=" * 118)
 
-    strong_up = [r for r in results if r.get("signal") == "强" and r["prediction"] == "涨"]
-    strong_dn = [r for r in results if r.get("signal") == "强" and r["prediction"] == "跌"]
-    weak_up = [r for r in results if r.get("signal") == "弱" and r["prediction"] == "偏涨"]
-    weak_dn = [r for r in results if r.get("signal") == "弱" and r["prediction"] == "偏跌"]
-    neutral = [r for r in results if r.get("signal") == "无"]
-    other = [r for r in results if r.get("signal") is None]
+    def model_tag(r):
+        if r is None:
+            return "无K线"
+        pred = r.get("prediction", "") or ""
+        if pred == "数据不足":
+            return "数据不足"
+        if pred == "特征计算失败":
+            return "特征失败"
+        if r.get("signal") == "强":
+            return "强涨" if pred == "涨" else "强跌"
+        if r.get("signal") == "弱":
+            return "偏涨" if pred == "偏涨" else "偏跌"
+        if r.get("signal") == "无":
+            return "震荡"
+        return "其他"
 
-    def print_group(title, items, emoji):
-        if not items:
+    def inf_short(inf):
+        if not inf:
+            return "—", None, "—", "", ""
+        k = inf.get("kind", "")
+        sc = float(inf.get("score", 50))
+        if k == "暂无明显拐点":
+            return "—", sc, "—", k, ""
+        if k == "可能向上拐点":
+            ks = "向上"
+        elif k == "可能向下拐点":
+            ks = "向下"
+        else:
+            ks = "切换"
+        return ks, sc, inf.get("strength", "—"), k, inf.get("hint", "") or ""
+
+    hdr = (
+        f"  {'代码':12s} {'名称':10s} {'模型':6s} {'置信':>6s} {'标准P':>7s} {'强P':>7s} {'投票':>6s} "
+        f"{'拐点分':>6s} {'拐点':4s} {'拐强':4s} {'拐点简述':16s} {'收盘':>10s} {'日期':12s}"
+    )
+
+    by_code = {r["code"]: r for r in results}
+    strong_up = sum(1 for r in results if r.get("signal") == "强" and r.get("prediction") == "涨")
+    strong_dn = sum(1 for r in results if r.get("signal") == "强" and r.get("prediction") == "跌")
+    weak_up = sum(1 for r in results if r.get("signal") == "弱" and r.get("prediction") == "偏涨")
+    weak_dn = sum(1 for r in results if r.get("signal") == "弱" and r.get("prediction") == "偏跌")
+    neutral = sum(1 for r in results if r.get("signal") == "无")
+
+    buckets = defaultdict(list)
+    for code in codes:
+        r = by_code.get(code)
+        if r is None:
+            buckets["无K线"].append((code, None))
+        else:
+            buckets[model_tag(r)].append((code, r))
+
+    def numeric_confidence(cr):
+        """用于组内排序：强涨=投票一致度，强跌=1-P标，偏弱=偏离0.5；无则置底"""
+        _, r = cr
+        if r is None:
+            return None
+        c = r.get("confidence")
+        if c is None:
+            return None
+        try:
+            return float(c)
+        except (TypeError, ValueError):
+            return None
+
+    def sort_bucket_rows(rows):
+        rows.sort(
+            key=lambda cr: (
+                0 if numeric_confidence(cr) is not None else 1,
+                -(numeric_confidence(cr) or 0.0),
+                cr[0],
+            )
+        )
+
+    for _k in buckets:
+        sort_bucket_rows(buckets[_k])
+
+    section_order = [
+        ("强涨", f"强涨 | 强标签 P≥{UP_P_THRESHOLD:.0%} 且子模型投票≥{UP_VOTE_AGREE:.0%}"),
+        ("强跌", f"强跌 | 标准模型 P≤{DN_P_THRESHOLD:.0%}"),
+        ("偏涨", "偏涨 | 标准 P≥60%，未达强涨条件"),
+        ("偏跌", "偏跌 | 标准 P≤40%，未达强跌条件"),
+        ("震荡", "震荡 | 标准 P 在 40%–60%"),
+        ("数据不足", "数据不足 | K 线长度不够，未参与预测"),
+        ("特征失败", "特征失败 | 特征矩阵异常"),
+        ("无K线", "无 K 线 | 本地无缓存或未拉到数据"),
+        ("其他", "其他 | 未归类"),
+    ]
+
+    def print_merged_row(code, r):
+        if r is None:
+            print(
+                f"  {code:12s} {'(无K线)':10s} {'—':6s} {'—':>6s} {'—':>7s} {'—':>7s} {'—':>6s} "
+                f"{'—':>6s} {'—':4s} {'—':^4s} {'':16s} {'—':>10s} {'':12s}"
+            )
             return
-        print(f"\n  {emoji} {title}:")
-        for r in sorted(items, key=lambda x: x.get("confidence", 0) or 0, reverse=True):
-            p = r["probability"]
-            c = r["confidence"]
-            label = f"{r['code']} {r.get('name', '')}"
-            print(f"    {label:24s}  P(涨)={p:.1%}  置信={c:.2f}  "
-                  f"收盘={r['last_close']}  ({r['last_date']})")
+        inf = r.get("inflection")
+        ik, iscore, istr, _fullk, ihint = inf_short(inf)
+        ik = ik or "—"
+        hint_disp = (ihint[:14] + "…") if len(ihint) > 14 else (ihint or "")
+        sc_str = f"{iscore:6.1f}" if iscore is not None else "   —  "
+        ist = str(istr) if istr is not None else "—"
 
-    print_group("强烈看涨 (P≥80%)", strong_up, "🟢")
-    print_group("强烈看跌 (P≤20%)", strong_dn, "🔴")
-    print_group("偏看涨 (60%≤P<80%)", weak_up, "🟡")
-    print_group("偏看跌 (20%<P≤40%)", weak_dn, "🟠")
-    print_group("震荡 (40%<P<60%)", neutral, "⚪")
+        cf = r.get("confidence")
+        if cf is not None:
+            try:
+                cf_str = f"{float(cf):5.0%}"
+            except (TypeError, ValueError):
+                cf_str = "   —  "
+        else:
+            cf_str = "   —  "
 
-    if other:
-        print(f"\n  ⚠️ 无法预测:")
-        for r in other:
-            label = f"{r['code']} {r.get('name', '')}"
-            print(f"    {label:24s}  {r['prediction']}")
+        ps = r.get("probability_std")
+        if ps is not None:
+            pss = f"{ps:.1%}"
+            pst = f"{r.get('probability_strong', 0):.1%}"
+            vr = f"{r.get('vote_ratio', 0):.0%}"
+        else:
+            pss = pst = vr = "   —  "
 
-    # 统计
-    print(f"\n" + "-" * 70)
-    total = len([r for r in results if r.get("probability") is not None])
-    print(f"  总计 {total} 只股票")
-    print(f"  强烈看涨: {len(strong_up)}  强烈看跌: {len(strong_dn)}")
-    print(f"  偏看涨: {len(weak_up)}  偏看跌: {len(weak_dn)}  震荡: {len(neutral)}")
-    print(f"\n  注意: 仅 '强烈看涨/看跌' 信号经回测验证准确率 ≥60%")
-    print(f"  其余信号仅供参考，不构成投资建议。")
+        lc = r.get("last_close")
+        ld = r.get("last_date") or ""
+        if lc is None:
+            lc = "—"
+        else:
+            lc = str(lc)
+
+        nm = r.get("name")
+        name = ("" if nm is None or (isinstance(nm, float) and np.isnan(nm)) else str(nm))[:10]
+        mt = model_tag(r)
+        disp_tag = {"强涨": "强涨", "强跌": "强跌", "偏涨": "偏涨", "偏跌": "偏跌", "震荡": "震荡",
+                    "数据不足": "数据不足", "特征失败": "特征失败"}.get(mt, "—")
+        print(
+            f"  {code:12s} {name:10s} {disp_tag:6s} {cf_str:>6s} {pss:>7s} {pst:>7s} {vr:>6s} "
+            f"{sc_str} {ik:4s} {ist:^4s} {hint_disp:16s} {lc:>10s} {ld:12s}"
+        )
+
+    for key, title in section_order:
+        rows = buckets.get(key, [])
+        if not rows:
+            continue
+        print(f"\n  {'─' * 56}")
+        print(f"  【{title}】 共 {len(rows)} 只（组内按置信度↓）")
+        print(f"  {'─' * 56}")
+        print(hdr)
+        print("  " + "-" * 118)
+        for code, r in rows:
+            print_merged_row(code, r)
+
+    print(f"\n" + "-" * 118)
+    total = len([r for r in results if r.get("probability_std") is not None])
+    report_path = _predict_report_path()
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "predict_forward_days": FORWARD,
+        "dual_model_path": os.path.basename(DUAL_MODEL_PATH_HK),
+        "thresholds": {
+            "up_p_strong": UP_P_THRESHOLD,
+            "up_vote_agree": UP_VOTE_AGREE,
+            "up_vote_model": UP_VOTE_MODEL_THRESH,
+            "dn_p_strong": DN_P_THRESHOLD,
+        },
+        "summary": {
+            "watchlist_count": len(codes),
+            "predictable_count": total,
+            "strong_up": strong_up,
+            "strong_dn": strong_dn,
+            "weak_up": weak_up,
+            "weak_dn": weak_dn,
+            "neutral": neutral,
+        },
+        "results": _to_jsonable(results),
+    }
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    print(f"  总计 {total} 只可预测 / 自选 {len(codes)} 只")
+    print(f"  强涨:{strong_up} 强跌:{strong_dn} 偏涨:{weak_up} 偏跌:{weak_dn} 震荡:{neutral}")
+    print(f"\n  已保存报告: {report_path}")
+    print(f"\n  回测精度: 涨信号≈66%  跌信号≈76%")
+    print(f"  仅供参考，不构成投资建议。")
 
 
 if __name__ == "__main__":
